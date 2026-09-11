@@ -1,5 +1,139 @@
 # Changelog
 
+## [2.2.0](https://github.com/griffinmartin/opencode-claude-auth/compare/v2.1.6...v2.2.0) (2026-09-01)
+
+
+### Features
+
+* update model config for Claude CLI 2.1.257 ([#279](https://github.com/griffinmartin/opencode-claude-auth/issues/279)) ([09a13b4](https://github.com/griffinmartin/opencode-claude-auth/commit/09a13b4c3d5cf7c303cf234207627e667efa5277))
+
+## [2.1.6](https://github.com/griffinmartin/opencode-claude-auth/compare/v2.1.5...v2.1.6) (2026-08-03)
+
+
+### Bug Fixes
+
+* make OAuth refresh resilient to transient rate-limits (+ diagnostics) ([#264](https://github.com/griffinmartin/opencode-claude-auth/issues/264)) ([5532c37](https://github.com/griffinmartin/opencode-claude-auth/commit/5532c37dec127f0a6cac2308901e030d75331f1a))
+* preserve thinking blocks when repairing tool pairs after compaction ([#263](https://github.com/griffinmartin/opencode-claude-auth/issues/263)) ([8de49c8](https://github.com/griffinmartin/opencode-claude-auth/commit/8de49c81a0effeb0217b2d98aa7d7b4a1f389ed3))
+
+## [2.1.5](https://github.com/griffinmartin/opencode-claude-auth/compare/v2.1.4...v2.1.5) (2026-07-30)
+
+
+### Bug Fixes
+
+* handle external rotation of the Claude Code credential ([#260](https://github.com/griffinmartin/opencode-claude-auth/issues/260)) ([5a44883](https://github.com/griffinmartin/opencode-claude-auth/commit/5a44883817bfc7f1aa497f2c06432d7e5c472c08))
+* refresh OAuth tokens with native fetch instead of a subprocess ([#258](https://github.com/griffinmartin/opencode-claude-auth/issues/258)) ([231165b](https://github.com/griffinmartin/opencode-claude-auth/commit/231165b9859c6195c412896e1207daf2aed4affa))
+
+## [2.1.4](https://github.com/griffinmartin/opencode-claude-auth/compare/v2.1.3...v2.1.4) (2026-07-26)
+
+
+### Bug Fixes
+
+* proactive OAuth token refresh before session expiry ([#238](https://github.com/griffinmartin/opencode-claude-auth/issues/238)) ([ed1d735](https://github.com/griffinmartin/opencode-claude-auth/commit/ed1d7357b62eb9e50461ef3e6b6f447bbc68fd71))
+
+## [2.1.3](https://github.com/griffinmartin/opencode-claude-auth/compare/v2.1.2...v2.1.3) (2026-07-25)
+
+
+### Bug Fixes
+
+* honor `CLAUDE_CONFIG_DIR` ([#239](https://github.com/griffinmartin/opencode-claude-auth/issues/239)) ([65e1bb3](https://github.com/griffinmartin/opencode-claude-auth/commit/65e1bb367bd92bbae57e74d6c4d8db0ae91d688f))
+
+## [2.1.2](https://github.com/griffinmartin/opencode-claude-auth/compare/v2.1.1...v2.1.2) (2026-07-25)
+
+
+### Bug Fixes
+
+* update credential handling to prioritize primary service for token refresh ([#99](https://github.com/griffinmartin/opencode-claude-auth/issues/99)) ([9dd33d6](https://github.com/griffinmartin/opencode-claude-auth/commit/9dd33d69cca6de9e09284e99334b7edfb3686a3c))
+
+## [2.1.1](https://github.com/griffinmartin/opencode-claude-auth/compare/v2.1.0...v2.1.1) (2026-07-25)
+
+
+### Bug Fixes
+
+* enforce tool_result adjacency in repairToolPairs ([#250](https://github.com/griffinmartin/opencode-claude-auth/issues/250)) ([d056c7c](https://github.com/griffinmartin/opencode-claude-auth/commit/d056c7c9d8e34ebb421022005cf16f268b383281))
+* recover after external OAuth credential rotation ([#252](https://github.com/griffinmartin/opencode-claude-auth/issues/252)) ([0242e85](https://github.com/griffinmartin/opencode-claude-auth/commit/0242e858ae45aaea0cae55f00a42287b3e501ea5))
+
+## [2.1.0](https://github.com/griffinmartin/opencode-claude-auth/compare/v2.0.1...v2.1.0) (2026-07-25)
+
+
+### Features
+
+* update model config for Claude CLI 2.1.217, fix 401 credential refresh, repo hygiene ([#248](https://github.com/griffinmartin/opencode-claude-auth/issues/248)) ([ab54ebb](https://github.com/griffinmartin/opencode-claude-auth/commit/ab54ebb85d6812c04c7f2809840dd525f2638058))
+
+## [2.0.1](https://github.com/griffinmartin/opencode-claude-auth/compare/v2.0.0...v2.0.1) (2026-07-25)
+
+
+### Bug Fixes
+
+* keep API errors out of terminal UI ([#244](https://github.com/griffinmartin/opencode-claude-auth/issues/244)) ([baf1ffd](https://github.com/griffinmartin/opencode-claude-auth/commit/baf1ffd0b10ebdb5b5bc03464b93def1219de671))
+* normalize fractional credential expiry timestamps ([#246](https://github.com/griffinmartin/opencode-claude-auth/issues/246)) ([686a543](https://github.com/griffinmartin/opencode-claude-auth/commit/686a54395d23388c7c0193d112d4ca973034bbed))
+
+## [2.0.0](https://github.com/griffinmartin/opencode-claude-auth/compare/v1.5.4...v2.0.0) (2026-07-08)
+
+
+### ⚠ BREAKING CHANGES
+
+* remove 1M context opt-in feature ([#240](https://github.com/griffinmartin/opencode-claude-auth/issues/240))
+
+### Features
+
+* remove 1M context opt-in feature ([#240](https://github.com/griffinmartin/opencode-claude-auth/issues/240)) ([88b0f79](https://github.com/griffinmartin/opencode-claude-auth/commit/88b0f793b84b08e60558c42bea8b3d142a70d9d9))
+
+## [1.5.4](https://github.com/griffinmartin/opencode-claude-auth/compare/v1.5.3...v1.5.4) (2026-05-15)
+
+
+### Bug Fixes
+
+* reload .credentials.json on cache miss to detect external updates ([#220](https://github.com/griffinmartin/opencode-claude-auth/issues/220)) ([6ff5dc7](https://github.com/griffinmartin/opencode-claude-auth/commit/6ff5dc76536cd0fbc5dd1b1a456cba968e642787))
+
+## [1.5.3](https://github.com/griffinmartin/opencode-claude-auth/compare/v1.5.2...v1.5.3) (2026-04-30)
+
+
+### Bug Fixes
+
+* increase max buffer for reading keychain dump ([#201](https://github.com/griffinmartin/opencode-claude-auth/issues/201)) ([2f97161](https://github.com/griffinmartin/opencode-claude-auth/commit/2f97161d36810ee0d9c7be6de95c66bf844eee2f))
+
+## [1.5.2](https://github.com/griffinmartin/opencode-claude-auth/compare/v1.5.1...v1.5.2) (2026-04-30)
+
+
+### Bug Fixes
+
+* detect out-of-extra-usage error and cap retry-after delay ([#211](https://github.com/griffinmartin/opencode-claude-auth/issues/211)) ([88a114e](https://github.com/griffinmartin/opencode-claude-auth/commit/88a114efd273d3f32908a31494363adce30cd9de))
+
+## [1.5.1](https://github.com/griffinmartin/opencode-claude-auth/compare/v1.5.0...v1.5.1) (2026-04-30)
+
+
+### Bug Fixes
+
+* restore Claude subscription auth parity for Claude Code 2.1.112 ([#207](https://github.com/griffinmartin/opencode-claude-auth/issues/207)) ([572f94c](https://github.com/griffinmartin/opencode-claude-auth/commit/572f94c3869eb2d17c87f2d6f6f8e87d05b21af5))
+
+## [1.5.0](https://github.com/griffinmartin/opencode-claude-auth/compare/v1.4.10...v1.5.0) (2026-04-16)
+
+
+### Features
+
+* add Claude Opus 4.7 model support ([#203](https://github.com/griffinmartin/opencode-claude-auth/issues/203)) ([cc96338](https://github.com/griffinmartin/opencode-claude-auth/commit/cc963387b7a6d95c9dbdd1782c2e594b5aa3d6ba))
+
+## [1.4.10](https://github.com/griffinmartin/opencode-claude-auth/compare/v1.4.9...v1.4.10) (2026-04-14)
+
+
+### Bug Fixes
+
+* PascalCase tool names after mcp_ prefix to match Claude Code convention ([#191](https://github.com/griffinmartin/opencode-claude-auth/issues/191)) ([9121ca4](https://github.com/griffinmartin/opencode-claude-auth/commit/9121ca47a5e9757e041aea240a29c10e4dfabf95))
+
+## [1.4.9](https://github.com/griffinmartin/opencode-claude-auth/compare/v1.4.8...v1.4.9) (2026-04-08)
+
+
+### Bug Fixes
+
+* re-trigger npm publish after failed v1.4.8 release ([#150](https://github.com/griffinmartin/opencode-claude-auth/issues/150)) ([5412711](https://github.com/griffinmartin/opencode-claude-auth/commit/5412711bca7e5596c3784573d249d4db53ef9427))
+
+## [1.4.8](https://github.com/griffinmartin/opencode-claude-auth/compare/v1.4.7...v1.4.8) (2026-04-08)
+
+
+### Bug Fixes
+
+* relocate system prompt to user message to avoid OAuth 400 rejection ([#148](https://github.com/griffinmartin/opencode-claude-auth/issues/148)) ([bb6320c](https://github.com/griffinmartin/opencode-claude-auth/commit/bb6320cbe9c985a89258bf2ca1e027f2be7cd923))
+
 ## [1.4.7](https://github.com/griffinmartin/opencode-claude-auth/compare/v1.4.6...v1.4.7) (2026-04-05)
 
 

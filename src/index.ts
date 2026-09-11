@@ -3,6 +3,7 @@ import crypto from "node:crypto"
 import { config } from "./model-config.ts"
 import { readAllClaudeAccounts, type ClaudeAccount } from "./keychain.ts"
 import { initLogger, log } from "./logger.ts"
+import { fetchWithRetry } from "./http.ts"
 import {
   addExcludedBeta,
   getExcludedBetas,
@@ -11,17 +12,25 @@ import {
   isLongContextError,
   LONG_CONTEXT_BETAS,
 } from "./betas.ts"
-import { transformBody, transformResponseStream } from "./transforms.ts"
-import { applyOpencodeConfig } from "./plugin-config.ts"
+import {
+  SYSTEM_IDENTITY,
+  transformBody,
+  transformResponseStream,
+} from "./transforms.ts"
 import {
   getCachedCredentials,
-  getCredentialsForSync,
+  getCredentialsWithBackoff,
+  getActiveRefreshFailureKind,
+  reloadCredentialsFromSource,
+  forceRefreshActiveAccount,
+  getActiveAccount,
   syncAuthJson,
   initAccounts,
   setActiveAccountSource,
   loadPersistedAccountSource,
   saveAccountSource,
   refreshAccountsList,
+  refreshIfNeeded,
   type ClaudeCredentials,
 } from "./credentials.ts"
 
@@ -34,8 +43,10 @@ export {
   LONG_CONTEXT_BETAS,
 } from "./betas.ts"
 export { resetExcludedBetas } from "./betas.ts"
+export { fetchWithRetry, type FetchFn } from "./http.ts"
 export {
   stripToolPrefix,
+  SYSTEM_IDENTITY,
   transformBody,
   transformResponseStream,
 } from "./transforms.ts"
@@ -45,16 +56,12 @@ export {
   refreshAccountsList,
   type ClaudeCredentials,
 } from "./credentials.ts"
-export { isEnable1mContext, type PluginSettings } from "./plugin-config.ts"
 export {
   buildBillingHeaderValue,
   computeCch,
   computeVersionSuffix,
   extractFirstUserMessageText,
 } from "./signing.ts"
-
-const SYSTEM_IDENTITY_PREFIX =
-  "You are Claude Code, Anthropic's official CLI for Claude."
 
 function getCliVersion(): string {
   return process.env.ANTHROPIC_CLI_VERSION ?? config.ccVersion
@@ -63,40 +70,42 @@ function getCliVersion(): string {
 function getUserAgent(): string {
   return (
     process.env.ANTHROPIC_USER_AGENT ??
-    `claude-cli/${getCliVersion()} (external, cli)`
+    `claude-cli/${getCliVersion()} (external, sdk-cli)`
   )
+}
+
+function getStainlessHeaders(): Record<string, string> {
+  return {
+    "x-stainless-arch": process.arch === "arm64" ? "arm64" : process.arch,
+    "x-stainless-lang": "js",
+    "x-stainless-os":
+      process.platform === "darwin" ? "MacOS" : process.platform,
+    "x-stainless-package-version": "0.81.0",
+    "x-stainless-retry-count": "0",
+    "x-stainless-runtime": "node",
+    "x-stainless-runtime-version": process.version,
+    "x-stainless-timeout": "600",
+  }
+}
+
+function buildRequestUrl(input: RequestInfo | URL): string | URL {
+  const raw =
+    typeof input === "string"
+      ? input
+      : input instanceof URL
+        ? input.toString()
+        : input.url
+
+  const url = new URL(raw)
+  if (url.pathname === "/v1/messages" && !url.searchParams.has("beta")) {
+    url.searchParams.set("beta", "true")
+  }
+
+  return typeof input === "string" ? url.toString() : url
 }
 
 // Stable per-process session ID, matching Claude Code's X-Claude-Code-Session-Id
 const sessionId = crypto.randomUUID()
-
-type FetchFn = typeof fetch
-
-export async function fetchWithRetry(
-  input: RequestInfo | URL,
-  init?: RequestInit,
-  retries = 3,
-  fetchImpl: FetchFn = fetch,
-): Promise<Response> {
-  for (let i = 0; i < retries; i++) {
-    const res = await fetchImpl(input, init)
-    if ((res.status === 429 || res.status === 529) && i < retries - 1) {
-      const retryAfter = res.headers.get("retry-after")
-      const parsed = retryAfter ? parseInt(retryAfter, 10) : NaN
-      const delay = Number.isNaN(parsed) ? (i + 1) * 2000 : parsed * 1000
-      log("fetch_rate_limited", {
-        status: res.status,
-        attempt: i + 1,
-        retryAfter: retryAfter ?? "none",
-        delayMs: delay,
-      })
-      await new Promise((r) => setTimeout(r, delay))
-      continue
-    }
-    return res
-  }
-  return fetchImpl(input, init)
-}
 
 export function buildRequestHeaders(
   input: RequestInfo | URL,
@@ -146,16 +155,21 @@ export function buildRequestHeaders(
   headers.set("authorization", `Bearer ${accessToken}`)
   headers.set("anthropic-version", "2023-06-01")
   headers.set("anthropic-beta", mergedBetas.join(","))
+  headers.set("anthropic-dangerous-direct-browser-access", "true")
   headers.set("x-app", "cli")
   headers.set("user-agent", getUserAgent())
   headers.set("x-client-request-id", crypto.randomUUID())
   headers.set("X-Claude-Code-Session-Id", sessionId)
+  for (const [key, value] of Object.entries(getStainlessHeaders())) {
+    if (!headers.has(key)) headers.set(key, value)
+  }
   headers.delete("x-api-key")
 
   return headers
 }
 
 const SYNC_INTERVAL = 5 * 60 * 1000 // 5 minutes
+const PROACTIVE_REFRESH_THRESHOLD_MS = 60 * 60 * 1000 // 1 hour before expiry
 
 const plugin: Plugin = async () => {
   initLogger()
@@ -191,7 +205,7 @@ const plugin: Plugin = async () => {
       activeSource: defaultAccount.source,
     })
 
-    const initialCreds = getCachedCredentials()
+    const initialCreds = await getCachedCredentials()
     if (initialCreds) {
       syncAuthJson(initialCreds)
     } else {
@@ -200,11 +214,46 @@ const plugin: Plugin = async () => {
       )
     }
 
-    // Keep auth.json synced with current credentials (no refresh triggered)
-    const syncTimer = setInterval(() => {
+    // Keep auth.json synced and proactively refresh before expiry.
+    // refreshIfNeeded() always resolves the currently ACTIVE account
+    // (via getActiveAccount() internally) — not a closure-captured account
+    // list — so this stays correct across account switches. Passing
+    // PROACTIVE_REFRESH_THRESHOLD_MS (1 hour) means it triggers a real
+    // OAuth refresh once the token is within that window of expiry, and
+    // simply returns the untouched credentials otherwise (no-op refresh).
+    // This prevents the "run `claude` to re-authenticate" message from
+    // appearing mid-session when the token silently expires.
+    let proactiveRefreshWarned = false
+    const syncTimer = setInterval(async () => {
       try {
-        const creds = getCredentialsForSync()
-        if (creds) syncAuthJson(creds)
+        const account = getActiveAccount()
+        log("proactive_refresh_check", {
+          source: account?.source ?? null,
+          expiresAt: account?.credentials?.expiresAt ?? null,
+          thresholdMs: PROACTIVE_REFRESH_THRESHOLD_MS,
+        })
+
+        const creds = await refreshIfNeeded(
+          undefined,
+          PROACTIVE_REFRESH_THRESHOLD_MS,
+        )
+        if (creds) {
+          syncAuthJson(creds)
+          if (proactiveRefreshWarned) {
+            log("proactive_refresh_recovered", { source: account?.source })
+          }
+          proactiveRefreshWarned = false
+        } else {
+          log("proactive_refresh_failed", { source: account?.source })
+          // Only warn once per outage — otherwise this fires every
+          // SYNC_INTERVAL (5 min) for as long as refresh keeps failing.
+          if (!proactiveRefreshWarned) {
+            proactiveRefreshWarned = true
+            console.warn(
+              "opencode-claude-auth: Proactive token refresh failed. Run `claude` to re-authenticate.",
+            )
+          }
+        }
       } catch {
         // Non-fatal
       }
@@ -218,19 +267,16 @@ const plugin: Plugin = async () => {
   }
 
   return {
-    config: async (opencodeConfig) => {
-      applyOpencodeConfig(opencodeConfig)
-    },
     "experimental.chat.system.transform": async (input, output) => {
       if (input.model?.providerID !== "anthropic") {
         return
       }
 
       const hasIdentityPrefix = output.system.some((entry) =>
-        entry.includes(SYSTEM_IDENTITY_PREFIX),
+        entry.includes(SYSTEM_IDENTITY),
       )
       if (!hasIdentityPrefix) {
-        output.system.unshift(SYSTEM_IDENTITY_PREFIX)
+        output.system.unshift(SYSTEM_IDENTITY)
       }
     },
     auth: {
@@ -260,16 +306,51 @@ const plugin: Plugin = async () => {
 
         return {
           apiKey: "",
+          baseURL: "https://api.anthropic.com/v1",
           async fetch(input: RequestInfo | URL, init?: RequestInit) {
-            const latest = getCachedCredentials()
+            const requestInit = init ?? {}
+            let latest = await getCachedCredentials()
             if (!latest) {
+              // A transient refresh rate-limit must not surface as a hard error.
+              // Wait (bounded, abort-aware) for our cooldown to clear or for a
+              // sibling OpenCode instance / the claude CLI to write a fresh
+              // token to the shared store.
+              latest = await getCredentialsWithBackoff({
+                signal: requestInit.signal ?? undefined,
+              })
+            }
+            if (!latest) {
+              if (getActiveRefreshFailureKind() === "transient") {
+                // Retryable: let OpenCode/the AI SDK back off and retry rather
+                // than telling the user to re-authenticate for a passing
+                // rate-limit that the refresh token would otherwise survive.
+                log("fetch_credentials_transient_exhausted", {
+                  modelId: "unknown",
+                })
+                return new Response(
+                  JSON.stringify({
+                    type: "error",
+                    error: {
+                      type: "overloaded_error",
+                      message:
+                        "Claude token refresh is rate-limited; retry shortly.",
+                    },
+                  }),
+                  {
+                    status: 429,
+                    headers: {
+                      "content-type": "application/json",
+                      "retry-after": "5",
+                    },
+                  },
+                )
+              }
               log("fetch_no_credentials", { modelId: "unknown" })
               throw new Error(
                 "Claude Code credentials are unavailable or expired. Run `claude` to refresh them.",
               )
             }
 
-            const requestInit = init ?? {}
             const bodyStr =
               typeof requestInit.body === "string"
                 ? requestInit.body
@@ -290,6 +371,7 @@ const plugin: Plugin = async () => {
 
             // Get excluded betas for this model (from previous failed requests)
             const excluded = getExcludedBetas(modelId)
+            const requestUrl = buildRequestUrl(input)
             const headers = buildRequestHeaders(
               input,
               requestInit,
@@ -300,13 +382,15 @@ const plugin: Plugin = async () => {
             const body = transformBody(requestInit.body)
 
             const headerKeys: string[] = []
-            headers.forEach((_, key) => headerKeys.push(key))
+            headers.forEach((_, key) => {
+              headerKeys.push(key)
+            })
             const betas = (headers.get("anthropic-beta") ?? "")
               .split(",")
               .filter(Boolean)
             log("fetch_headers_built", { headerKeys, betas, modelId })
 
-            let response = await fetchWithRetry(input, {
+            let response = await fetchWithRetry(requestUrl, {
               ...requestInit,
               body,
               headers,
@@ -318,27 +402,166 @@ const plugin: Plugin = async () => {
               retryAttempt: 0,
             })
 
-            // On 401, force a credential refresh and retry once.
-            // This handles the common case of token expiry mid-session.
-            if (response.status === 401) {
-              log("fetch_401_retry", { modelId })
-              const refreshed = getCachedCredentials()
-              if (refreshed && refreshed.accessToken !== latest.accessToken) {
-                const retryHeaders = buildRequestHeaders(
+            // Recover from a rejected token: first by adopting credentials
+            // rotated externally (cswap switching accounts, the claude CLI,
+            // another OpenCode instance), then by forcing an OAuth refresh
+            // when the store still holds the token that was just rejected.
+            //
+            // Most cases resolve on the first attempt: a cold or unreadable
+            // store yields null from the reload (reloadCredentialsFromSource
+            // rejects anything expiring within 60s), so the force refresh runs
+            // immediately. The second attempt covers the narrower race where
+            // the reload returns a valid-looking token that a concurrent
+            // writer has itself just rotated again.
+            //
+            // The cap is the real bound. Against a store being rotated on
+            // every read, every candidate differs from tokenInUse, so the
+            // no-progress break never fires and the cap alone stops the loop.
+            // The break is the fast path out of the common cases, not the
+            // guarantee of termination.
+            //
+            // tokenInUse deliberately tracks only the last token tried rather
+            // than the set of all of them: a store cycling A->B->A wastes one
+            // request on the second attempt, which is a better trade than
+            // threading extra state through a loop whose whole virtue is a
+            // hard ceiling of three API calls.
+            const MAX_AUTH_RECOVERY_ATTEMPTS = 2
+            let tokenInUse = latest.accessToken
+
+            for (
+              let attempt = 0;
+              response.status === 401 && attempt < MAX_AUTH_RECOVERY_ATTEMPTS;
+              attempt++
+            ) {
+              let candidate: ClaudeCredentials | null = null
+              // reloadCredentialsFromSource already catches its own source
+              // read and returns null, so this is unreachable today. It stays
+              // because the guarantee worth keeping is that no reload failure
+              // turns a well-formed 401 into an exception thrown out of
+              // fetch() — degrading to the original response beats crashing
+              // the request. It logs so a future reload that does throw is
+              // diagnosable rather than silently null-coalesced.
+              try {
+                candidate = reloadCredentialsFromSource()
+              } catch (err) {
+                log("auth_recovery_reload_threw", {
+                  modelId,
+                  attempt: attempt + 1,
+                  error: err instanceof Error ? err.message : String(err),
+                })
+              }
+
+              if (!candidate || candidate.accessToken === tokenInUse) {
+                try {
+                  candidate = await forceRefreshActiveAccount()
+                } catch (err) {
+                  // A rejected refresh and a refresh that returned null are
+                  // different operator-facing diagnoses; auth_recovery_
+                  // exhausted below collapses them, so record this one here.
+                  log("auth_recovery_force_refresh_threw", {
+                    modelId,
+                    attempt: attempt + 1,
+                    error: err instanceof Error ? err.message : String(err),
+                  })
+                }
+              }
+
+              // Re-checked, not copy-pasted: the guard above decides whether
+              // to force a refresh, this one decides whether that refresh
+              // actually produced a token worth retrying with.
+              if (!candidate || candidate.accessToken === tokenInUse) {
+                log("auth_recovery_exhausted", {
+                  modelId,
+                  attempt: attempt + 1,
+                })
+                break
+              }
+
+              tokenInUse = candidate.accessToken
+              log("auth_recovery_retry", { modelId, attempt: attempt + 1 })
+              response = await fetchWithRetry(requestUrl, {
+                ...requestInit,
+                body,
+                headers: buildRequestHeaders(
                   input,
                   requestInit,
-                  refreshed.accessToken,
+                  tokenInUse,
                   modelId,
                   excluded,
-                )
-                response = await fetchWithRetry(input, {
+                ),
+              })
+            }
+
+            // An external switch — cswap rotating off an exhausted account —
+            // leaves this session on the old token until the 30s credential
+            // cache expires. Re-read once so a rate limit that has already
+            // been resolved elsewhere is not surfaced. A changed token is the
+            // signal that a switch happened; when nothing changed this costs
+            // one source read and no retry.
+            //
+            // Ordered AFTER the 401 recovery loop, and that is a real
+            // dependency, not incidental sequencing: it must compare against
+            // the token the loop last tried, so a 401 recovered into a 429 is
+            // measured against the recovered token rather than the rejected
+            // one. Only half of this is compiler-enforced — hoisting the block
+            // above `let tokenInUse` is a TDZ error, but moving it between
+            // that declaration and the loop still compiles and still passes,
+            // while silently comparing against a stale token on the
+            // 401 -> retry -> 429 path.
+            //
+            // Ordered before the long-context beta loop deliberately. A
+            // long-context 429 is a header problem, not an account one, so it
+            // rotates no token and falls through here untouched. In the rare
+            // case a switch lands on the same 429, this spends one retry that
+            // comes back with the same long-context error and the beta loop
+            // then handles it off the fresh response — one wasted request,
+            // same outcome.
+            if (response.status === 429) {
+              let rotated: ClaudeCredentials | null = null
+              // Unreachable today for the same reason as the 401 loop's
+              // reload catch: reloadCredentialsFromSource swallows its own
+              // source read and returns null. Kept, and logged, on the same
+              // grounds — no reload failure should turn a readable 429 into
+              // an exception thrown out of fetch(), and a future reload that
+              // does throw should be diagnosable rather than silently
+              // coalesced to "nothing rotated".
+              try {
+                rotated = reloadCredentialsFromSource()
+              } catch (err) {
+                log("rate_limit_reload_threw", {
+                  modelId,
+                  error: err instanceof Error ? err.message : String(err),
+                })
+              }
+
+              if (rotated && rotated.accessToken !== tokenInUse) {
+                // Named for what was observed, not for what it implies. A
+                // changed token is not proof of an account switch: a routine
+                // refresh of this same exhausted account by another instance
+                // or the claude CLI changes the token too, and that retry hits
+                // the same quota. Accepted cost — one request — but the log
+                // must not tell a quota investigation "we switched accounts"
+                // when all it saw was a different token.
+                log("rate_limit_token_changed", { modelId })
+                tokenInUse = rotated.accessToken
+                response = await fetchWithRetry(requestUrl, {
                   ...requestInit,
                   body,
-                  headers: retryHeaders,
+                  headers: buildRequestHeaders(
+                    input,
+                    requestInit,
+                    tokenInUse,
+                    modelId,
+                    excluded,
+                  ),
                 })
-                log("fetch_401_retry_result", {
-                  status: response.status,
+                // Whether rotating resolved the limit is the question this
+                // whole block exists to answer, so record it outright rather
+                // than leaving success to be inferred from the absence of a
+                // fetch_error_response line.
+                log("rate_limit_retry_response", {
                   modelId,
+                  status: response.status,
                 })
               }
             }
@@ -373,8 +596,10 @@ const plugin: Plugin = async () => {
               })
 
               // Rebuild headers without the excluded beta and retry
-              const currentCreds = getCachedCredentials()
-              const retryToken = currentCreds?.accessToken ?? latest.accessToken
+              // Falls back to tokenInUse, not latest: after a 401 recovery the
+              // latter is the token the API already rejected.
+              const currentCreds = await getCachedCredentials()
+              const retryToken = currentCreds?.accessToken ?? tokenInUse
               const newExcluded = getExcludedBetas(modelId)
               const newHeaders = buildRequestHeaders(
                 input,
@@ -384,14 +609,14 @@ const plugin: Plugin = async () => {
                 newExcluded,
               )
 
-              response = await fetchWithRetry(input, {
+              response = await fetchWithRetry(requestUrl, {
                 ...requestInit,
                 body,
                 headers: newHeaders,
               })
             }
 
-            // Log non-200 responses at warn level so they're visible in OpenCode
+            // Record non-200 responses without writing over OpenCode's terminal UI.
             if (!response.ok) {
               const status = response.status
               const cloned = response.clone()
@@ -407,14 +632,16 @@ const plugin: Plugin = async () => {
                       parsed.error?.message ?? parsed.error?.type ?? errorBody
                   } catch {}
                   log("fetch_error_response", { status, modelId, message })
-                  console.warn(
-                    `opencode-claude-auth: API ${status} for ${modelId}: ${message}`,
-                  )
                 })
                 .catch(() => {})
             }
 
-            return transformResponseStream(response)
+            // A 401 that survived recovery carries an error body, not an SSE
+            // stream. Deciding here rather than from a flag set mid-flight
+            // makes the retried and non-retried paths behave identically.
+            return response.status === 401
+              ? response
+              : transformResponseStream(response)
           },
         }
       },
@@ -436,10 +663,7 @@ const plugin: Plugin = async () => {
                 options: currentAccounts.map((a) => ({
                   label: a.label,
                   value: a.source,
-                  hint:
-                    a.source === currentSource
-                      ? `${a.source} (active)`
-                      : a.source,
+                  hint: a.source === currentSource ? "active" : undefined,
                 })),
               },
             ]
@@ -457,15 +681,15 @@ const plugin: Plugin = async () => {
               accounts[0]
 
             setActiveAccountSource(chosen.source)
-            const creds = getCachedCredentials() ?? chosen.credentials
+            const creds = (await getCachedCredentials()) ?? chosen.credentials
 
             syncAuthJson(creds)
             saveAccountSource(chosen.source)
 
             const sourceDescription =
               chosen.source === "file"
-                ? "credentials file (~/.claude/.credentials.json)"
-                : "macOS Keychain"
+                ? `credentials file (${chosen.configDir ?? "~/.claude"}/.credentials.json)`
+                : `macOS Keychain (${chosen.source})`
 
             return {
               url: "",
